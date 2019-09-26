@@ -136,6 +136,32 @@ class MembershipEnumerator(object):
         props['userpassword'] = ADUtils.get_entry_property(entry, 'userPassword')
         props['admincount'] = ADUtils.get_entry_property(entry, 'adminCount', 0) == 1
 
+    @staticmethod
+    def add_computer_properties(computer, entry):
+        props = computer['Properties']
+        # print entry
+        # Is user enabled? Checked by seeing if the UAC flag 2 (ACCOUNT_DISABLED) is not set
+        props['lastlogon'] = ADUtils.win_timestamp_to_unix(
+            ADUtils.get_entry_property(entry, 'lastLogon', default=0, raw=True)
+        )
+        props['lastlogontimestamp'] = ADUtils.win_timestamp_to_unix(
+            ADUtils.get_entry_property(entry, 'lastlogontimestamp', default=0, raw=True)
+        )
+        props['pwdlastset'] = ADUtils.win_timestamp_to_unix(
+            ADUtils.get_entry_property(entry, 'pwdLastSet', default=0, raw=True)
+        )
+        props['dontreqpreauth'] = ADUtils.get_entry_property(entry, 'userAccountControl', default=0) & 0x00400000 == 0x00400000
+        props['sensitive'] = ADUtils.get_entry_property(entry, 'userAccountControl', default=0) & 0x00100000 == 0x00100000
+        props['serviceprincipalnames'] = ADUtils.get_entry_property(entry, 'servicePrincipalName', [])
+        props['hasspn'] = len(props['serviceprincipalnames']) > 0
+        props['displayname'] = ADUtils.get_entry_property(entry, 'displayName')
+        props['email'] = ADUtils.get_entry_property(entry, 'mail')
+        props['title'] = ADUtils.get_entry_property(entry, 'title')
+        props['homedirectory'] = ADUtils.get_entry_property(entry, 'homeDirectory')
+        props['description'] = ADUtils.get_entry_property(entry, 'description')
+        props['userpassword'] = ADUtils.get_entry_property(entry, 'userPassword')
+        props['admincount'] = ADUtils.get_entry_property(entry, 'adminCount', 0) == 1
+
     def enumerate_users(self):
         filename = 'users.json'
 
@@ -198,6 +224,72 @@ class MembershipEnumerator(object):
         self.result_q.join()
 
         logging.debug('Finished writing users')
+
+    def enumerate_computers(self):
+        filename = 'computers_acl.json' # XXX: TODO: merge in computers.json
+
+        # Should we include extra properties in the query?
+        with_properties = 'objectprops' in self.collect
+        acl = 'acl' in self.collect
+        # Already retrieve by prefetch_info()
+        #entries = self.addc.get_computers(include_properties=with_properties, acl=acl)
+        entries = self.addc.ad.computers
+
+        logging.debug('Writing computers to file: %s', filename)
+
+        # Use a separate queue for processing the results
+        self.result_q = queue.Queue()
+        results_worker = threading.Thread(target=OutputWorker.membership_write_worker, args=(self.result_q, 'computers', filename))
+        results_worker.daemon = True
+        results_worker.start()
+
+        if acl and not self.disable_pooling:
+            self.aclenumerator.init_pool()
+
+        # This loops over a generator, results are fetched from LDAP on the go
+        for key, entry in entries.iteritems():
+            resolved_entry = ADUtils.resolve_ad_entry(entry)
+            computer = {
+                "Name": resolved_entry['principal'],
+                "PrimaryGroup": self.get_primary_membership(entry),
+                "Properties": {
+                    "domain": self.addomain.domain.upper(),
+                    "objectsid": entry['attributes']['objectSid'],
+                    "highvalue": False,
+                    #"unconstraineddelegation": ADUtils.get_entry_property(entry, 'userAccountControl', default=0) & 0x00080000 == 0x00080000
+                    "unconstraineddelegation": False
+                },
+                "Aces": []
+            }
+
+            if with_properties:
+                MembershipEnumerator.add_computer_properties(computer, entry)
+            self.addomain.computers[entry['dn']] = resolved_entry
+            # If we are enumerating ACLs, we break out of the loop here
+            # this is because parsing ACLs is computationally heavy and therefor is done in subprocesses
+            if acl:
+                if self.disable_pooling:
+                    # Debug mode, don't run this pooled since it hides exceptions
+                    self.process_stuff(parse_binary_acl(computer, 'computer', ADUtils.get_entry_property(entry, 'nTSecurityDescriptor', raw=True), self.addc.objecttype_guid_map))
+                else:
+                    # Process ACLs in separate processes, then call the processing function to resolve entries and write them to file
+                    self.aclenumerator.pool.apply_async(parse_binary_acl, args=(computer, 'computer', ADUtils.get_entry_property(entry, 'nTSecurityDescriptor', raw=True), self.addc.objecttype_guid_map), callback=self.process_stuff)
+            else:
+                # Write it to the queue -> write to file in separate thread
+                # this is solely for consistency with acl parsing, the performance improvement is probably minimal
+                self.result_q.put(computer)
+
+        # If we are parsing ACLs, close the parsing pool first
+        # then close the result queue and join it
+        if acl and not self.disable_pooling:
+            self.aclenumerator.pool.close()
+            self.aclenumerator.pool.join()
+            self.result_q.put(None)
+        else:
+            self.result_q.put(None)
+        self.result_q.join()
+
+        logging.debug('Finished writing computers')
 
     def enumerate_groups(self):
 
@@ -291,4 +383,5 @@ class MembershipEnumerator(object):
 
     def enumerate_memberships(self):
         self.enumerate_users()
+        self.enumerate_computers()
         self.enumerate_groups()
