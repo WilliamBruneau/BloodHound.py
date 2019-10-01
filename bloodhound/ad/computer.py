@@ -30,15 +30,17 @@ from impacket.dcerpc.v5.ndr import NULL
 from impacket.dcerpc.v5.dtypes import RPC_SID, MAXIMUM_ALLOWED
 from impacket import smb
 from impacket.smb3structs import SMB2_DIALECT_21
-from bloodhound.ad.utils import ADUtils
+from bloodhound.ad.utils import ADUtils, AceResolver
+from bloodhound.enumeration.acls import parse_binary_acl
 
 class ADComputer(object):
     """
     Computer connected to Active Directory
     """
-    def __init__(self, hostname=None, samname=None, ad=None, objectsid=None, kerberos=False):
+    def __init__(self, hostname=None, samname=None, ad=None, addc=None, objectsid=None, kerberos=False):
         self.hostname = hostname
         self.ad = ad
+        self.addc = addc
         self.kerberos = kerberos
         self.samname = samname
         self.rpc = None
@@ -55,6 +57,8 @@ class ADComputer(object):
         # The SID within the domain
         self.objectsid = objectsid
         self.primarygroup = None
+        if addc:
+            self.aceresolver = AceResolver(ad, ad.objectresolver)
 
     def get_bloodhound_data(self, entry, collect):
         data = {
@@ -92,6 +96,16 @@ class ADComputer(object):
             if servicepack:
                 props['operatingsystem'] = '%s %s' % (props['operatingsystem'], servicepack)
             # TODO: AllowedToDelegate
+        if 'acl' in collect:
+            _, aces = parse_binary_acl(data,
+                                       'computer',
+                                       ADUtils.get_entry_property(entry,
+                                                                  'nTSecurityDescriptor',
+                                                                  raw=True),
+                                       self.addc.objecttype_guid_map)
+            # Parse aces
+            data['Aces'] = self.aceresolver.resolve_aces(aces)
+
         return data
 
     def try_connect(self):

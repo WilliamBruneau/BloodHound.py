@@ -42,12 +42,13 @@ class ComputerEnumerator(MembershipEnumerator):
     This class extends the MembershipEnumerator class just to inherit the
     membership lookup functions which are also needed for computers.
     """
-    def __init__(self, addomain, collect, do_gc_lookup=True, kerberos=False):
+    def __init__(self, addomain, addc, collect, do_gc_lookup=True, kerberos=False):
         """
         Computer enumeration. Enumerates all computers in the given domain.
         Every domain enumerated will get its own instance of this class.
         """
         self.addomain = addomain
+        self.addc = addc
         # Blacklist and whitelist are only used for debugging purposes
         self.blacklist = []
         self.whitelist = []
@@ -105,7 +106,7 @@ class ComputerEnumerator(MembershipEnumerator):
             Processes a single computer, pushes the results of the computer to the given queue.
         """
         logging.debug('Querying computer: %s', hostname)
-        c = ADComputer(hostname=hostname, samname=samname, ad=self.addomain, objectsid=objectsid, kerberos=self.kerberos)
+        c = ADComputer(hostname=hostname, samname=samname, ad=self.addomain, addc=self.addc, objectsid=objectsid, kerberos=self.kerberos)
         c.primarygroup = self.get_primary_membership(entry)
         if c.try_connect() == True:
             try:
