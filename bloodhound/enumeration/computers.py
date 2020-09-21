@@ -222,8 +222,10 @@ class ComputerEnumerator(MembershipEnumerator):
                                                'Weight': 2}))
 
             except DCERPCException:
+                results_q.put(('computer', c.get_bloodhound_data(entry, self.collect)))
                 logging.warning('Querying computer failed: %s' % hostname)
             except Exception as e:
+                results_q.put(('computer', c.get_bloodhound_data(entry, self.collect)))
                 logging.error('Unhandled exception in computer %s processing: %s', hostname, str(e))
                 logging.info(traceback.format_exc())
         else:
